@@ -1,15 +1,20 @@
 """
-Module to recognise template on images.
+Module to recognise template on images and QR-codes.
 
-How to use:
-First generate template object using function generate_template.
-    template_obj = generate_template(template_path)
+How to find picture on image:
+    First generate template object using function generate_template.
+        template_obj = generate_template(template_path)
 
-Then use function recognise_picture to recognise template on the
-source image. If template has found it return numpy array with
-coords of edges found template else it return None.
-Use key-arg trace=True to show images with found template.
-    dst = recognise_picture(source_image, template_obj)
+    Then use function recognise_picture to recognise template on the
+    source image. If template has found it return numpy array with
+    coords of edges found template else it return None.
+    Use key-arg trace=True to show images with found template.
+        dst = recognise_picture(source_image, template_obj)
+
+How to find QR-code:
+    Use function recognise_qr giving source image in args.
+    If QR has found return data from QR and it's position
+    else return None.
 """
 
 from itertools import combinations
@@ -17,8 +22,14 @@ from math import isqrt
 import numpy
 import cv2
 
-SIFT = cv2.xfeatures2d.SIFT_create()  # Initiate SIFT detector
-MATCHER = cv2.BFMatcher()  # BFMatcher with default params
+SIFT = None
+MATCHER = None
+QR_DETECTOR = None
+KERNEL = -1 / 256 * numpy.array([[1, 4, 6, 4, 1],
+                                 [4, 16, 24, 16, 4],
+                                 [6, 24, -476, 24, 6],
+                                 [4, 16, 24, 16, 4],
+                                 [1, 4, 6, 4, 1]])
 
 
 def is_right_form(pts: list, frame_shape: (int, int), *, min_size: int = 25):
@@ -48,10 +59,11 @@ def is_right_form(pts: list, frame_shape: (int, int), *, min_size: int = 25):
     if any(x > frame_shape[1] or y > frame_shape[0] for x, y in pts):
         return False
 
-    # If distance betwen two points less than min_size it is wrong
-    if any(isqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2) <= min_size
-           for pt1, pt2 in combinations(pts, r=2)):
-        return False
+    # ! Если разкоментить меньше ошибок, но реже замечает
+    # # If distance betwen two points less than min_size it is wrong
+    # if any(isqrt((pt1[0] - pt2[0])**2 + (pt1[1] - pt2[1])**2) <= min_size
+    #        for pt1, pt2 in combinations(pts, r=2)):
+    #     return False
 
     line12 = make_line(pts[0], pts[1])
     line23 = make_line(pts[1], pts[2])
@@ -83,6 +95,12 @@ def generate_template(template):
     Generate object with information about template:
     image, keypoints and descriptors
     """
+    global SIFT
+    global MATCHER
+
+    if SIFT is None:
+        SIFT = cv2.xfeatures2d.SIFT_create()  # Initiate SIFT detector
+        MATCHER = cv2.BFMatcher()  # BFMatcher with default params
 
     # If we have path in template we try to open it.
     if isinstance(template, str):
@@ -94,7 +112,7 @@ def generate_template(template):
         else:
             template = cv2.imread(template, cv2.IMREAD_GRAYSCALE)
 
-    template_obj = {"template": template}
+    template_obj = {"template": cv2.filter2D(template, -1, KERNEL)}
     template_obj["template_keypoints"], template_obj["template_descriptors"] = SIFT.detectAndCompute(
         template_obj["template"], None)
 
@@ -105,7 +123,7 @@ def recognise_picture(
         source: str or numpy.ndarray,
         template_obj: dict,
         *,
-        min_match_count: int = 20,
+        min_match_count: int = 18,
         dist_coeff: float = 0.9,
         trace: bool = False) -> None or numpy.ndarray:
     """
@@ -113,6 +131,12 @@ def recognise_picture(
     If source given as str we will try to
     open image, located on this path.
     """
+    global SIFT
+    global MATCHER
+
+    if SIFT is None:
+        SIFT = cv2.xfeatures2d.SIFT_create()  # Initiate SIFT detector
+        MATCHER = cv2.BFMatcher()  # BFMatcher with default params
 
     # If we have path in source we try to open it.
     if isinstance(source, str):
@@ -128,9 +152,19 @@ def recognise_picture(
     # matrix = cv2.getRotationMatrix2D((cols / 2, rows / 2), 14, 1)
     # source_image = cv2.warpAffine(source_image, matrix, (cols, rows))
 
+    source = cv2.filter2D(source, -1, KERNEL)
+
     source_keypoints, source_descriptors = SIFT.detectAndCompute(source, None)
-    matches = MATCHER.knnMatch(
-        template_obj["template_descriptors"], source_descriptors, k=2)
+    try:
+        matches = MATCHER.knnMatch(
+            template_obj["template_descriptors"], source_descriptors, k=2)
+    except BaseException:
+        print("[-] что-то не так с точками")
+        return None
+
+    if matches and len(matches[0]) == 1:
+        print("[-] что-то не так с точками")
+        return None
 
     good = [m for m, n in matches if m.distance < n.distance * dist_coeff]
 
@@ -150,7 +184,7 @@ def recognise_picture(
         print("[-] что-то не так с точками")
         return None
 
-    h, w = template_obj["template"].shape  # размеры шаблона
+    h, w = template_obj["template"].shape[:2]  # размеры шаблона
     points = numpy.asarray([[0, 0], [0, h - 1], [w - 1, h - 1],
                             [w - 1, 0]], dtype=numpy.float32).reshape(-1, 1, 2)
 
@@ -169,6 +203,10 @@ def recognise_picture(
         img_res = cv2.cvtColor(source, cv2.COLOR_GRAY2BGR)
         img_res = cv2.polylines(
             img_res, dst, True, (0, 255, 255), 2, cv2.LINE_AA)
+
+        center_dot = (sum(dot[0] for [dot] in dst[0]) // 4,
+                      sum(dot[1] for [dot] in dst[0]) // 4)
+        img_res = cv2.circle(img_res, center_dot, 2, (0, 0, 255), 5)
 
         # рисуем совпадения контрольных точек
         matches_mask = mask.ravel().tolist()
@@ -192,69 +230,40 @@ def recognise_picture(
     return dst[0]
 
 
-if __name__ == "__main__":
-    import sys
-    print("OpenCV ", cv2.__version__)
+def recognise_qr(source: str or numpy.ndarray, *,
+                 trace: bool = False) -> (str, numpy.ndarray) or None:
+    """
+    Recognise QR codes on pictures and return tuple with qr-data and
+    points with positions of verties of QR on source or return None if
+    QR-code not found.
+    """
+    global QR_DETECTOR
 
-    if len(sys.argv) == 1:
-        template_path = "Logo.png"
-        video_path = "Sources/video_2020-08-28_15-53-46.mp4"
-        out_path = "output.avi"
-    elif len(sys.argv) == 3:
-        template_path, video_path, out_path = sys.argv[1:3], ""
-    elif len(sys.argv) == 4:
-        template_path, video_path, out_path = sys.argv[1:4]
+    if QR_DETECTOR is None:
+        QR_DETECTOR = cv2.QRCodeDetector()  # enable QRCode detector
 
-    template_obj = generate_template(template_path)
+    if isinstance(source, str):
+        if source.startswith("rtsp"):
+            cap = cv2.VideoCapture(source)
+            _, source = cap.read()
+            cap.release()
+            source = cv2.cvtColor(source, cv2.COLOR_BGR2GRAY)
+        else:
+            source = cv2.imread(source, cv2.IMREAD_GRAYSCALE)
 
-    cap = cv2.VideoCapture(video_path)
+    try:
+        data, bbox, _ = QR_DETECTOR.detectAndDecode(source)
+    except BaseException:
+        return None
 
-    if out_path:
-        frame_width = int(cap.get(3) * 0.4)
-        frame_height = int(cap.get(4) * 0.4)
+    if not data:
+        return None
 
-        out = cv2.VideoWriter(
-            out_path,
-            cv2.VideoWriter_fourcc(
-                'M',
-                'J',
-                'P',
-                'G'),
-            20,
-            (frame_width,
-             frame_height))
-    else:
-        out = None
+    print("QR Code detected: ", data)
+    bbox = numpy.array(bbox, int)
 
-    while cap.isOpened():
-        ret, frame = cap.read()
+    if trace:
+        img_res = cv2.polylines(source, bbox, True, (0, 255, 255))
 
-        if not ret:
-            continue
-
-        source_image = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        dsize = (int(source_image.shape[1] * 0.4),
-                 int(source_image.shape[0] * 0.4))
-        source_image = cv2.resize(
-            src=source_image,
-            dsize=dsize,
-            interpolation=cv2.INTER_CUBIC)
-
-        dst = recognise_picture(source_image, template_obj, trace=True)
-
-        if dst is not None:
-            img_res = cv2.cvtColor(source_image, cv2.COLOR_GRAY2BGR)
-            img_res = cv2.polylines(
-                img_res, [dst], True, (0, 255, 255), 2, cv2.LINE_AA)
-
-            # записываем результат
-            if out:
-                out.write(img_res)
-
-        if cv2.waitKey(1) == ord("q"):
-            break
-
-    cap.release()
-    if out:
-        out.release()
-    cv2.destroyAllWindows()
+        cv2.imshow("img", img_res)
+    return data, bbox
