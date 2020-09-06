@@ -21,10 +21,10 @@ from itertools import combinations
 from math import isqrt
 import numpy
 import cv2
+from pyzbar import pyzbar
 
 SIFT = None
 MATCHER = None
-QR_DETECTOR = None
 KERNEL = -1 / 256 * numpy.array([[1, 4, 6, 4, 1],
                                  [4, 16, 24, 16, 4],
                                  [6, 24, -476, 24, 6],
@@ -233,14 +233,10 @@ def recognise_picture(
 def recognise_qr(source: str or numpy.ndarray, *,
                  trace: bool = False) -> (str, numpy.ndarray) or None:
     """
-    Recognise QR codes on pictures and return tuple with qr-data and
-    points with positions of verties of QR on source or return None if
+    Recognise QR codes on pictures and return array of tuples with qr-data
+    and points with positions of verties of QR on source or return None if
     QR-code not found.
     """
-    global QR_DETECTOR
-
-    if QR_DETECTOR is None:
-        QR_DETECTOR = cv2.QRCodeDetector()  # enable QRCode detector
 
     if isinstance(source, str):
         if source.startswith("rtsp"):
@@ -251,19 +247,21 @@ def recognise_qr(source: str or numpy.ndarray, *,
         else:
             source = cv2.imread(source, cv2.IMREAD_GRAYSCALE)
 
-    try:
-        data, bbox, _ = QR_DETECTOR.detectAndDecode(source)
-    except BaseException:
+    barcodes = pyzbar.decode(source)
+    res = []
+    for barcode in barcodes:
+        bbox = numpy.array(
+            [[point for point in barcode.polygon]], dtype=numpy.int)
+        data = barcode.data.decode("utf-8")
+        res.append((data, bbox))
+
+    if not res:
         return None
 
-    if not data:
-        return None
-
-    print("QR Code detected: ", data)
-    bbox = numpy.array(bbox, int)
-
+    print("QR Code detected: ", [data for data, bbox in res])
     if trace:
-        img_res = cv2.polylines(source, bbox, True, (0, 255, 255))
+        for data, bbox in res:
+            img_res = cv2.polylines(source, bbox, True, (0, 255, 255))
 
         cv2.imshow("img", img_res)
-    return data, bbox
+    return res
